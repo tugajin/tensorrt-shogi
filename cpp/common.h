@@ -134,7 +134,7 @@ struct SimpleProfiler : public nvinfer1::IProfiler
         int count{0};
     };
 
-    virtual void reportLayerTime(const char* layerName, float ms)
+    virtual void reportLayerTime(const char* layerName, float ms) noexcept
     {
         mProfile[layerName].count++;
         mProfile[layerName].time += ms;
@@ -290,15 +290,15 @@ class HostMemory : public IHostMemory
 {
 public:
     HostMemory() = delete;
-    void* data() const noexcept override
+    void* data() const noexcept 
     {
         return mData;
     }
-    std::size_t size() const noexcept override
+    std::size_t size() const noexcept 
     {
         return mSize;
     }
-    DataType type() const noexcept override
+    DataType type() const noexcept 
     {
         return mType;
     }
@@ -574,13 +574,13 @@ inline void enableDLA(IBuilder* builder, IBuilderConfig* config, int useDLACore,
         {
             config->setFlag(BuilderFlag::kGPU_FALLBACK);
         }
-        if (!builder->getInt8Mode() && !config->getFlag(BuilderFlag::kINT8))
-        {
-            // User has not requested INT8 Mode.
-            // By default run in FP16 mode. FP32 mode is not permitted.
-            builder->setFp16Mode(true);
-            config->setFlag(BuilderFlag::kFP16);
-        }
+        // if (!builder->getInt8Mode() && !config->getFlag(BuilderFlag::kINT8))
+        // {
+        //     // User has not requested INT8 Mode.
+        //     // By default run in FP16 mode. FP32 mode is not permitted.
+        //     builder->setFp16Mode(true);
+        //     config->setFlag(BuilderFlag::kFP16);
+        // }
         config->setDefaultDeviceType(DeviceType::kDLA);
         config->setDLACore(useDLACore);
         config->setFlag(BuilderFlag::kSTRICT_TYPES);
