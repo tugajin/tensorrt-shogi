@@ -38,8 +38,10 @@
 #include "buffers.h"
 
 const int batchSize = 1;
+const int skipSample = 1;
 std::vector<std::string> inputTensorNames;
 std::vector<std::string> outputTensorNames;
+std::string serializePath("~/Documents/tensorrt-shog/tmp/shogi_resnet_serialize.bin");
 
 //! \brief  The SampleOnnxMNIST class implements the ONNX MNIST sample
 //!
@@ -60,6 +62,11 @@ public:
     //! \brief Function builds the network engine
     //!
     bool build();
+
+    //!
+    //! \brief Function deserialize the network engine from file
+    //!
+    bool load();
 
     //!
     //! \brief Runs the TensorRT inference engine for this sample
@@ -131,6 +138,11 @@ bool SampleOnnxMNIST::build()
     {
         return false;
     }
+    auto profile = builder->createOptimizationProfile();
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMIN, Dims4{1, 1, 28, 28});
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kOPT, Dims4{2, 1, 28, 28});
+    profile->setDimensions(inputTensorNames[0].c_str(), OptProfileSelector::kMAX, Dims4{128, 1, 28, 28});
+    config->addOptimizationProfile(profile);
 
     mEngine = std::shared_ptr<nvinfer1::ICudaEngine>(
         builder->buildEngineWithConfig(*network, *config), samplesCommon::InferDeleter());
@@ -146,10 +158,31 @@ bool SampleOnnxMNIST::build()
     assert(network->getNbOutputs() == 1);
     mOutputDims = network->getOutput(0)->getDimensions();
     assert(mOutputDims.nbDims == 2);
+    IHostMemory *serializedModel = mEngine->serialize();
+
+    ofstream serializedModelFile(serializePath, ios::binary);
+    serializedModelFile.write((const char *)serializedModel->data(), serializedModel->size());
 
     return true;
 }
 
+bool SampleOnnxMNIST::load()
+{
+    ifstream serializedModelFile(serializePath, ios::in | ios::binary);
+    serializedModelFile.seekg(0, ios_base::end);
+    size_t fsize = serializedModelFile.tellg();
+    serializedModelFile.seekg(0, ios_base::beg);
+    std::vector<char> fdata(fsize);
+    serializedModelFile.read((char *)fdata.data(), fsize);
+
+    auto runtime = createInferRuntime(gLogger);
+    mEngine = std::shared_ptr<nvinfer1::ICudaEngine>(runtime->deserializeCudaEngine(fdata.data(), fsize, nullptr), samplesCommon::InferDeleter());
+
+    mInputDims = Dims4{1, 1, 28, 28};
+    mOutputDims = Dims2{1, 10};
+
+    return true;
+}
 //!
 //! \brief Uses a ONNX parser to create the Onnx MNIST Network and marks the
 //!        output layers
@@ -195,15 +228,18 @@ bool SampleOnnxMNIST::constructNetwork(SampleUniquePtr<nvinfer1::IBuilder>& buil
 //!
 bool SampleOnnxMNIST::infer()
 {
-    // Create RAII buffer manager object
-    samplesCommon::BufferManager buffers(mEngine, batchSize);
-
-    auto context = SampleUniquePtr<nvinfer1::IExecutionContext>(mEngine->createExecutionContext());
+    gLogInfo << "createExecutionContext" << std::endl;
+    auto context = mEngine->createExecutionContext();
     if (!context)
     {
         return false;
     }
-
+    context->setBindingDimensions(0, Dims4{batchSize, 1, 28, 28});
+    gLogInfo << "BufferManager" << std::endl;
+    // Create RAII buffer manager object
+    samplesCommon::BufferManager buffers(mEngine, batchSize, context);
+    
+    gLogInfo << "processInput" << std::endl;
     // Read the input data into the managed buffers
     assert(inputTensorNames.size() == 1);
     if (!processInput(buffers))
@@ -211,18 +247,22 @@ bool SampleOnnxMNIST::infer()
         return false;
     }
 
+    gLogInfo << "copyInputToDevice" << std::endl;
     // Memcpy from host input buffers to device input buffers
     buffers.copyInputToDevice();
 
+    gLogInfo << "executeV2" << std::endl;
     bool status = context->executeV2(buffers.getDeviceBindings().data());
     if (!status)
     {
         return false;
     }
 
+    gLogInfo << "copyOutputToHost" << std::endl;
     // Memcpy from device output buffers to host output buffers
     buffers.copyOutputToHost();
 
+    gLogInfo << "verifyOutput" << std::endl;
     // Verify results
     if (!verifyOutput(buffers))
     {
@@ -241,14 +281,31 @@ bool SampleOnnxMNIST::processInput(const samplesCommon::BufferManager& buffers)
     const int inputW = mInputDims.d[3];
 
     ifstream fin("data/mnist_test_images.bin", ios::in|ios::binary);
-    fin.seekg(inputH*inputW*sizeof(float)*1);
+    fin.seekg(inputH*inputW*sizeof(float)*skipSample);
 
     float* hostDataBuffer = static_cast<float*>(buffers.getHostBuffer(inputTensorNames[0]));
-    fin.read((char*)hostDataBuffer, inputH*inputW*sizeof(float));
+    fin.read((char*)hostDataBuffer, inputH*inputW*sizeof(float)*batchSize);
 
     return true;
 }
 
+bool compareResult(float *expected, float *actual, size_t size)
+{
+    float maxDiff = 0.0F;
+    size_t maxDiffIdx = 0;
+    for (size_t i = 0; i < size; i++)
+    {
+        float diff = abs(expected[i] - actual[i]);
+        if (diff > maxDiff)
+        {
+            maxDiff = diff;
+            maxDiffIdx = i;
+        }
+    }
+
+    gLogInfo << "max diff among " << size << " elements: [" << maxDiffIdx << "] " << expected[maxDiffIdx] << "!=" << actual[maxDiffIdx] << std::endl;
+    return maxDiff < 1e-3;
+}
 //!
 //! \brief Classifies digits and verify result
 //!
@@ -287,20 +344,38 @@ bool SampleOnnxMNIST::verifyOutput(const samplesCommon::BufferManager& buffers)
     return true;
 }
 
+bool checkSerializedFile()
+{
+    ifstream f(serializePath, ios::in | ios::binary);
+    return f.is_open();
+}
+
 int main(int argc, char** argv)
 {
     inputTensorNames.push_back("input_0");
     outputTensorNames.push_back("output_0");
     SampleOnnxMNIST sample;
 
-
-    if (!sample.build())
+    if (checkSerializedFile())
     {
-        gLogInfo << "build failed" << std::endl;
+        gLogInfo << "using serialized file" << std::endl;
+        if (!sample.load())
+        {
+            gLogInfo << "load failed" << std::endl;
+            return 1;
+        }
     }
+    else
+    {
+        if (!sample.build())
+        {
+            gLogInfo << "build failed" << std::endl;
+            return 1;
+        }
+    }
+
     if (!sample.infer())
     {
         gLogInfo << "infer failed" << std::endl;
     }
-
 }

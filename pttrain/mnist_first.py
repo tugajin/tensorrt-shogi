@@ -129,8 +129,9 @@ def main():
         model.eval()
         torch.onnx.export(model, (torch.zeros(1, 1, 28, 28, dtype=torch.float32, device=device),),
                           "data/mnist_cnn.onnx",
-                          verbose=True, input_names=["input_0"], output_names=["output_0"])
-
+                          verbose=True, input_names=["input_0"], output_names=["output_0"],
+                          dynamic_axes={'input_0': {0: 'batch_size'},  # variable length axes
+                                'output_0': {0: 'batch_size'}})
 
 if __name__ == '__main__':
     main()
